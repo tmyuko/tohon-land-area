@@ -384,6 +384,11 @@ def get_value_chars_from_cell_chars(cell_chars, area_text: str):
 # ・地番は第1セル
 # ・地積は第3セル
 # ・抹消判定は地積が見つかった行だけ
+#
+# ★修正点：地積がない行でも地番だけ返すことで、
+#   「地番行と地積行が分離している謄本形式」に対応。
+#   （例：福岡市博多区 619番 の行は地積が余白のため、
+#     以前は地番更新されず 45番1 が残ってしまっていた）
 # ============================================================
 
 def parse_candidate_from_line(line, horizontal_lines):
@@ -399,8 +404,22 @@ def parse_candidate_from_line(line, horizontal_lines):
     chiban_text = clean_cell_text(parts[0])
     chiseki_text_raw = parts[2]
 
+    # 地番を先に取得（地積の有無にかかわらず）
+    explicit_chiban = None
+    if re.search(r"\d+番\d*", chiban_text):
+        explicit_chiban = chiban_text
+
     area_text = extract_area_text_from_cell(chiseki_text_raw)
+
+    # ★ 地積がない行でも、地番があれば地番情報だけ返す
     if not area_text:
+        if explicit_chiban:
+            return {
+                "explicit_chiban": explicit_chiban,
+                "area": None,
+                "area_text": None,
+                "deleted": False,
+            }
         return None
 
     try:
@@ -412,10 +431,6 @@ def parse_candidate_from_line(line, horizontal_lines):
     value_chars = get_value_chars_from_cell_chars(chiseki_chars, area_text)
 
     deleted = is_deleted_text_span(value_chars, horizontal_lines)
-
-    explicit_chiban = None
-    if re.search(r"\d+番\d*", chiban_text):
-        explicit_chiban = chiban_text
 
     return {
         "explicit_chiban": explicit_chiban,
@@ -487,6 +502,25 @@ def process_pdf(file):
                     if not cand:
                         continue
 
+                    # ★ 地番変更行（地積なし・地番あり）の処理
+                    #   「45番1 → 619番」のような地番変更は、619番行に地積が記載されず
+                    #   45番1の地積をそのまま引き継ぐ。
+                    #   そのため旧地番ブロックの内容を新地番ブロックに移譲する。
+                    if cand["explicit_chiban"] and cand["area"] is None:
+                        new_chiban = cand["explicit_chiban"]
+                        if new_chiban not in blocks:
+                            # 直前ブロックの内容を新地番へ引き継ぐ
+                            if current_chiban and current_chiban in blocks:
+                                blocks[new_chiban] = blocks.pop(current_chiban)
+                                idx_old = chiban_order.index(current_chiban)
+                                chiban_order[idx_old] = new_chiban
+                            else:
+                                blocks[new_chiban] = []
+                                chiban_order.append(new_chiban)
+                        current_chiban = new_chiban
+                        continue
+
+                    # 地積あり行：地番を更新してブロックに追加
                     if cand["explicit_chiban"]:
                         current_chiban = cand["explicit_chiban"]
                         if current_chiban not in blocks:
